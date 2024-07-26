@@ -1,0 +1,1069 @@
+--Revised 2025_upm_supplemental_dashboard_data
+--Mike Brooks made changes to implement reporting periods and bring in staff that have been employeed less than 30 days. 
+WITH 
+reporting_period AS 
+(--Update this each plan year
+Select 
+ DATE('2024-05-01') AS reporting_period_start
+,DATE('2025-04-30') AS reporting_period_end
+,DATE('2024-05-01') AS r1_reporting_period_start
+,DATE('2024-07-31') AS r1_reporting_period_end
+,DATE('2024-08-01') AS r2_reporting_period_start
+,DATE('2024-10-31') AS r2_reporting_period_end
+,DATE('2024-11-01') AS r3_reporting_period_start
+,DATE('2025-01-31') AS r3_reporting_period_end
+,DATE('2025-02-01') AS r4_reporting_period_start
+,DATE('2025-04-30') AS r4_reporting_period_end
+)
+,emp_upm AS (
+  SELECT
+  ed.employee_pk,
+  ed.first_name,
+  ed.preferred_first_name,
+  ed.last_name,
+  ed.current_hire_date,
+  --DATE_DIFF(ed.current_hire_date,DATE('2024-04-01'), day)days_since_hire,
+  ed.work_email,
+  ed.agency,
+  ed.org,
+  ed.schedule_code,
+  ed.supervisor_employee_pk,
+  ed.supervisor_first_name,
+  ed.supervisor_preferred_first_name,
+  ed.supervisor_last_name,
+  sed.work_email AS supervisor_work_email,
+  upm.PERFPLAN_ID,
+  upm.STARTDATE,
+  upm.ENDDATE,
+  upm.CREATE_DATE,
+  upm.OUTOFDRAFT,
+  #rating field here
+  upm.DISCUSSEDFLAG AS sup_discussed_flag,
+  upm.DISCUSSEDDATE AS sup_discussed_date,
+  upm.EMP_DISCUSSEDFLAG,
+  upm.EMP_DISCUSSEDDATE,
+  --CASE WHEN EXTRACT(MONTH FROM upm.STARTDATE) > 4 THEN EXTRACT (YEAR FROM upm.STARTDATE) + 1 ELSE EXTRACT(YEAR FROM upm.STARTDATE) END AS plan_fy,
+    CASE --Updated case statement to bring in all active employees to the dashboard 2024-07-22
+    WHEN upm.STARTDATE IS NOT NULL
+      AND EXTRACT(MONTH FROM upm.STARTDATE) > 4
+        THEN EXTRACT (YEAR FROM upm.STARTDATE) + 1 
+    WHEN upm.STARTDATE IS NOT NULL
+      AND EXTRACT(MONTH FROM upm.STARTDATE) < 5
+        THEN EXTRACT (YEAR FROM upm.STARTDATE) 
+    WHEN upm.STARTDATE IS NULL--Added this to apply a plan_fy for people that do not have a plan yet
+      AND EXTRACT(MONTH FROM CURRENT_DATE) > 4
+        THEN EXTRACT (YEAR FROM CURRENT_DATE) + 1 
+          ELSE EXTRACT(YEAR FROM upm.STARTDATE)
+  END AS plan_fy,
+
+  --will need to change if not by FY, but may want to retain fy alias to make things easier -- PY 2025 is May through April.
+  CASE WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 4 THEN EXTRACT(YEAR FROM CURRENT_DATE()) + 1 ELSE EXTRACT(YEAR FROM CURRENT_DATE()) END AS current_fy, --retain fy alias to make things easier -- PY 2025 is May through April.
+  CASE
+    WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 10 AND EXTRACT(MONTH FROM CURRENT_DATE()) = 1 THEN "R3"
+    WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 1 AND EXTRACT(MONTH FROM CURRENT_DATE()) < 5 THEN "AS" --Q4 Annual Summary, April -New Perf year with May through April in 2025
+    WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 4 AND EXTRACT(MONTH FROM CURRENT_DATE()) < 8 THEN "R1"
+    WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 7 AND EXTRACT(MONTH FROM CURRENT_DATE()) < 11  THEN "R2"
+    ELSE "ERROR"
+      END AS current_quarter --current review
+  FROM `ut-dhrm-udot-datashare-prod.employee_data.employee_data` AS ed
+  LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.UPM` AS upm
+  ON ed.employee_pk = upm.EMPLOYEE_ID
+  LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.employee_data` AS sed
+  ON ed.supervisor_employee_pk = sed.employee_pk
+  WHERE ed.employee_status IN ("Active", "Leave Without Pay")
+  AND ed.performance_evaluation_required = "Y"
+--  AND PERFPLAN_PURPOSE_ID != 7 --2023/12/13 Added to remove Perf Improvement Plans
+  AND (PERFPLAN_PURPOSE_ID != 7 --2023/12/13 Added to remove Perf Improvement Plans
+        OR PERFPLAN_ID IS NULL--Added OR for staff that do not have a plan yet 2024-07-19
+      )
+  AND ed.agency = 810
+--  AND OUTOFDRAFT_DATE IS NOT NULL--Testing for plans that have not been activated 2023-08-30
+  -- AND (DATE_DIFF(CURRENT_DATE, ed.current_hire_date, day) < 29 and PERFPLAN_ID is not null)  
+  -- OR DATE_DIFF(CURRENT_DATE, ed.current_hire_date, day) > 29 --2024/6/4 Added to attempt to bring in folks that haven't been here for 30 days, but have a plan.
+  --AND DATE_DIFF(DATE('2024-03-01'), ed.current_hire_date, day) > 29--2023-09-29 Per Lorri citing policy, people do not need plans until day 30
+  --AND ed.current_hire_date <= DATE('2024-04-01')
+--AND ed.employee_pk = 164153
+),-- select * from emp_upm where employee_pk = 236283
+
+pip_plan AS 
+(
+Select DISTINCT employee_id, create_date, rp.reporting_period_start, rp.reporting_period_end
+,CASE
+  WHEN create_date BETWEEN rp.reporting_period_start AND rp.reporting_period_end
+    THEN 'Y'
+  ELSE 'N'
+END AS ineligible_for_p4p_pip   
+ From `ut-dhrm-udot-datashare-prod.employee_data.UPM` 
+CROSS JOIN reporting_period rp
+Where perfplan_purpose_id = 7  
+)Select * From pip_plan
+current_fy_plans AS(
+  SELECT
+  *,
+ CASE --Revised row num added 2024-07-22 to bring in all active employees to dashboard 
+    WHEN emp_upm.CREATE_DATE IS NULL--Added 2024-07-19 for employees without a plan yet
+      THEN 1
+    ELSE ROW_NUMBER() OVER(
+  PARTITION BY emp_upm.employee_pk
+  ORDER BY  emp_upm.CREATE_DATE DESC  --emp_upm.STARTDATE DESC, 7/3/2024 removed to bring in latest plan
+  ) END AS row_num,
+  -- ROW_NUMBER() OVER(
+  -- PARTITION BY emp_upm.employee_pk
+  -- ORDER BY  emp_upm.CREATE_DATE DESC  --emp_upm.STARTDATE DESC, 7/3/2024 removed to bring in latest plan
+  -- ) AS row_num,
+  CURRENT_DATE AS Date_Downloaded
+  FROM emp_upm
+  WHERE plan_fy = current_fy
+  AND (startdate between date('2024-05-01') and date('2025-04-30')
+      OR startdate IS NULL--Added OR to bring in all active employees with or without a plan 2024-07-22
+      ) --UPDATE each plan year to ensure we get correct year plan.
+),--select * from current_fy_plans where employee_pk = 236283
+
+goal1addition AS(
+  SELECT
+  cfp.*,
+  CONCAT(REPLACE(REPLACE(REPLACE(eg.goalname,'%', 'Percent'),',',' '),'&','and') , " - ", cfp.preferred_first_name, " ", cfp.last_name) AS goal1--Added replace statements 2023-09-13
+  ,ROW_NUMBER() OVER(PARTITION BY cfp.employee_pk ORDER BY eg.evaluationgoal_id DESC)as goal1num
+  FROM current_fy_plans AS cfp
+  LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.upm_evaluation_goals`  AS eg
+  ON cfp.PERFPLAN_ID = eg.perfplan_id
+  WHERE cfp.row_num = 1
+   AND (eg.goalname LIKE ('%1.%') OR eg.goalname LIKE ('1%') OR eg.goalname IS NULL) --Or statement added 2023-08-10 OR ISNULL added 2024-07-22
+   AND ((eg.goalname NOT LIKE '%Workplace Expectations - Teamwork and Collaboration%'
+   AND eg.goalname NOT LIKE '%Workplace Expectations - Learn and Grow%'
+   AND eg.goalname NOT LIKE '%Workplace Expectations - Accountability%'
+   AND eg.goalname NOT LIKE '%Workplace Expectations - Communication%')
+   OR eg.goalname IS NULL--OR ISNULL added 2024-07-22
+      )
+  ),--select * from goal1addition where employee_pk = 236283
+
+goal2addition AS(
+  SELECT
+  ga1.*,
+  CONCAT(REPLACE(REPLACE(REPLACE(eg.goalname,'%', 'Percent'),',',' '),'&','and')  , " - ", ga1.preferred_first_name, " ", ga1.last_name) AS goal2--Added replace statements 2023-09-13
+  ,ROW_NUMBER() OVER(PARTITION BY ga1.employee_pk ORDER BY eg.evaluationgoal_id DESC)as goal2num
+  FROM goal1addition AS ga1
+  LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.upm_evaluation_goals` AS eg
+  ON ga1.PERFPLAN_ID = eg.perfplan_id
+  WHERE ga1.row_num = 1
+  AND ga1.goal1num = 1
+  AND (eg.goalname LIKE ('%2.%') OR eg.goalname LIKE ('2%') OR eg.goalname IS NULL)--Or statement added 2023-08-10 OR ISNULL added 2024-07-22
+  AND ((eg.goalname NOT LIKE '%Workplace Expectations - Teamwork and Collaboration%'
+  AND eg.goalname NOT LIKE '%Workplace Expectations - Learn and Grow%'
+  AND eg.goalname NOT LIKE '%Workplace Expectations - Accountability%'
+  AND eg.goalname NOT LIKE '%Workplace Expectations - Communication%')
+  OR eg.goalname IS NULL--OR ISNULL added 2024-07-22
+      )
+),--select * from goal2addition where employee_pk = 236283
+
+goal3addition AS(
+  SELECT
+  ga2.*,
+  CONCAT(REPLACE(REPLACE(REPLACE(eg.goalname,'%', 'Percent'),',',' '),'&','and') , " - ", ga2.preferred_first_name, " ", ga2.last_name) AS goal3,--Added replace statements 2023-09-13
+  ROW_NUMBER() OVER(PARTITION BY ga2.employee_pk ORDER BY eg.evaluationgoal_id DESC)as goal3num
+  FROM goal2addition AS ga2
+  LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.upm_evaluation_goals`  AS eg
+  ON ga2.PERFPLAN_ID = eg.perfplan_id
+  WHERE ga2.row_num = 1
+  AND ga2.goal2num = 1
+  AND (eg.goalname LIKE ('%3.%') OR eg.goalname LIKE ('3%') OR eg.goalname IS NULL)--Or statement added 2023-08-10 OR ISNULL added 2024-07-22
+  AND ((eg.goalname NOT LIKE '%Workplace Expectations - Teamwork and Collaboration%'
+  AND eg.goalname NOT LIKE '%Workplace Expectations - Learn and Grow%'
+  AND eg.goalname NOT LIKE '%Workplace Expectations - Accountability%'
+  AND eg.goalname NOT LIKE '%Workplace Expectations - Communication%')
+  OR eg.goalname IS NULL--OR ISNULL added 2024-07-22
+      )
+),--select * from goal3addition where employee_pk = 236283
+teamworkgoal AS 
+(
+  SELECT
+  ga3.*,
+  CONCAT(eg.goalname, " - ", ga3.preferred_first_name, " ", ga3.last_name) AS teamworkgoal,
+  ROW_NUMBER() OVER(PARTITION BY ga3.employee_pk ORDER BY eg.evaluationgoal_id DESC)as goal4num
+  FROM goal3addition AS ga3
+  LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.upm_evaluation_goals`  AS eg
+  ON ga3.PERFPLAN_ID = eg.perfplan_id
+  WHERE ga3.row_num = 1 
+  AND ga3.goal3num = 1
+  AND(LOWER(eg.goalname) LIKE '%teamwork and collaboration%' 
+  OR LOWER(eg.goalname) LIKE '%team work and collaboration%'
+  OR LOWER(eg.goalname) LIKE '%team work and collabation%' 
+  OR LOWER(eg.goalname) LIKE '%team work & collaboration%' 
+  OR LOWER(eg.goalname) LIKE '%teamwork & collaboration%'
+  OR LOWER(eg.goalname) IS NULL-- OR ISNULL added 2024-07-22
+  )
+  AND (eg.goalname NOT LIKE ('%1.%') OR eg.goalname NOT LIKE ('1%') OR eg.goalname IS NULL) --2024-04-16--Additional Or's added 2024-07-22 to bring in all active employees
+  AND (eg.goalname NOT LIKE ('%2.%') OR eg.goalname NOT LIKE ('2%') OR eg.goalname IS NULL) 
+  AND (eg.goalname NOT LIKE ('%3.%') OR eg.goalname NOT LIKE ('3%') OR eg.goalname IS NULL) 
+),--select * from teamworkgoal where employee_pk = 236283
+learandgrowgoal AS 
+(
+  SELECT
+  ga4.*,
+  CONCAT(eg.goalname, " - ", ga4.preferred_first_name, " ", ga4.last_name) AS learnandgrowgoal,
+  ROW_NUMBER() OVER(PARTITION BY ga4.employee_pk ORDER BY eg.evaluationgoal_id DESC)as goal5num
+  FROM teamworkgoal AS ga4
+  LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.upm_evaluation_goals`  AS eg
+  ON ga4.PERFPLAN_ID = eg.perfplan_id
+  WHERE ga4.row_num = 1 
+    AND ga4.goal4num = 1
+  AND (LOWER(eg.goalname) LIKE '%learn and grow%'
+  OR LOWER(eg.goalname) LIKE '%learn & grow%'
+  OR LOWER(eg.goalname) IS NULL--Additional Or added 2024-07-22 to bring in all active employees
+  )
+  AND (eg.goalname NOT LIKE ('%1.%') OR eg.goalname NOT LIKE ('1%') OR eg.goalname IS NULL) --2024-04-16--Additional Or's added 2024-07-22 to bring in all active employees
+  AND (eg.goalname NOT LIKE ('%2.%') OR eg.goalname NOT LIKE ('2%') OR eg.goalname IS NULL) 
+  AND (eg.goalname NOT LIKE ('%3.%') OR eg.goalname NOT LIKE ('3%') OR eg.goalname IS NULL) 
+),--select * from learandgrowgoal where employee_pk = 236283
+
+accountabilitygoal AS 
+(
+  SELECT
+  ga5.*,
+  CONCAT(eg.goalname, " - ", ga5.preferred_first_name, " ", ga5.last_name) AS accountabilitygoal,
+  ROW_NUMBER() OVER(PARTITION BY ga5.employee_pk ORDER BY eg.evaluationgoal_id DESC)as goal6num
+  FROM learandgrowgoal AS ga5
+  LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.upm_evaluation_goals`  AS eg
+  ON ga5.PERFPLAN_ID = eg.perfplan_id
+  WHERE ga5.row_num = 1 
+    AND ga5.goal5num = 1
+  AND (LOWER(eg.goalname) LIKE '%accountability%' OR eg.goalname IS NULL) --OR added 2024-07-22 to bring in all active employees
+  AND (eg.goalname NOT LIKE ('%1.%') OR eg.goalname NOT LIKE ('1%') OR eg.goalname IS NULL) --2024-04-16--Additional Or's added 2024-07-22 to bring in all active employees
+  AND (eg.goalname NOT LIKE ('%2.%') OR eg.goalname NOT LIKE ('2%') OR eg.goalname IS NULL) 
+  AND (eg.goalname NOT LIKE ('%3.%') OR eg.goalname NOT LIKE ('3%') OR eg.goalname IS NULL) 
+),--select * from accountabilitygoal where employee_pk = 236283
+communicationgoal AS 
+(
+  SELECT
+  ga6.*,
+  CONCAT(eg.goalname, " - ", ga6.preferred_first_name, " ", ga6.last_name) AS communicationgoal,
+  ROW_NUMBER() OVER(PARTITION BY ga6.employee_pk ORDER BY eg.evaluationgoal_id DESC)as goal7num
+  FROM accountabilitygoal AS ga6
+  LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.upm_evaluation_goals`  AS eg
+  ON ga6.PERFPLAN_ID = eg.perfplan_id
+  WHERE ga6.row_num = 1 
+    AND ga6.goal6num = 1
+  AND (LOWER(eg.goalname) LIKE '%communication%' OR eg.goalname IS NULL) --OR added 2024-07-22 to bring in all active employees
+  AND (eg.goalname NOT LIKE ('%1.%') OR eg.goalname NOT LIKE ('1%') OR eg.goalname IS NULL) --2024-04-16 --Additional Or's added 2024-07-22 to bring in all active employees
+  AND (eg.goalname NOT LIKE ('%2.%') OR eg.goalname NOT LIKE ('2%') OR eg.goalname IS NULL) 
+  AND (eg.goalname NOT LIKE ('%3.%') OR eg.goalname NOT LIKE ('3%') OR eg.goalname IS NULL) 
+),--select * from communicationgoal where employee_pk = 236283
+
+goal_complete AS(
+  SELECT DISTINCT
+  ga7.*
+  FROM communicationgoal AS ga7--ga3
+
+  LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.upm_evaluation_goals`  AS eg
+  ON ga7.PERFPLAN_ID = eg.perfplan_id
+  WHERE ga7.row_num = 1
+  AND ga7.goal7num = 1
+  #AND ga3.employee_pk IN (172042, 225517)
+  #AND cfp.employee_pk = 113506 Good test case, has 3 perf plans this FY, make sure this pulls most recent
+),--select * from goal_complete where employee_pk = 236283
+
+combo AS(
+SELECT DISTINCT
+ed1.employee_pk,
+ed1.first_name,
+ed1.preferred_first_name,
+ed1.last_name,
+ed1.work_email,
+ed1.schedule_code,
+ed1.job_pk,
+ed1.job_title,
+ed1.working_title,
+ed1.position_pk,
+ed1.org,
+ed1.supervisor_employee_pk,
+ed1.supervisor_first_name,
+ed1.supervisor_preferred_first_name,
+ed1.supervisor_last_name,
+sd1.work_email AS supervisor_work_email,
+ed1.performance_evaluation_required,
+gc.perfplan_id,
+gc.startdate,
+gc.enddate,
+gc.create_date,
+gc.outofdraft,
+gc.sup_discussed_flag,
+gc.sup_discussed_date,
+gc.emp_discussedflag,
+gc.emp_discusseddate,
+gc.plan_fy, --will need to change if not by FY (or not, to make dashboards easier, just rename in there?)
+gc.current_fy, --will need to change if not by FY (or not, to make dashboards easier, just rename in there?)
+--gc.current_quarter,testing
+IFNULL(gc.current_quarter,   
+CASE--2023-07-20 added to see if this would force those without properly formatted plans into the dashboard
+    WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 10 AND EXTRACT(MONTH FROM CURRENT_DATE()) = 1 THEN 'R3'
+    WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 1 AND EXTRACT(MONTH FROM CURRENT_DATE()) < 5 THEN 'AS' --Q4 Annual Summary, April -New Perf year with May through April in 2025
+    WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 4 AND EXTRACT(MONTH FROM CURRENT_DATE()) < 8 THEN 'R1'
+    WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 7 AND EXTRACT(MONTH FROM CURRENT_DATE()) < 11 THEN 'R2'
+    ELSE 'ERROR' END) current_quarter,
+gc.date_downloaded,
+gc.goal1,
+gc.goal2,
+gc.goal3,
+gc.teamworkgoal,
+gc.learnandgrowgoal,
+gc.accountabilitygoal,
+gc.communicationgoal,
+sr.* EXCEPT (Email_Address, Goal_1_Name,Goal_2_Name,Goal_3_Name,Employee_Name____Accountability_Score,Employee_Name____Learn_and_Grow_Score,Employee_Name___Communication_Score,Employee_Name___Goal_1,Employee_Name___Goal_2,Employee_Name___Goal_3,Communication_Score,Teamwork_and_Collaboration_Score,Learn_and_Grow_Score,Accountability_Score,Goal_2_Score,Goal_1_Score,Goal_3_Score),
+CASE WHEN STRPOS(sr.Communication_Score, '-') > 0 
+     THEN TRIM(SUBSTR(sr.Communication_Score,1,STRPOS(sr.Communication_Score,'-') - 1))
+     ELSE sr.Communication_Score
+END as Communication_Score,
+CASE WHEN STRPOS(sr.Teamwork_and_Collaboration_Score, '-') > 0 
+     THEN TRIM(SUBSTR(sr.Teamwork_and_Collaboration_Score,1,STRPOS(sr.Teamwork_and_Collaboration_Score,'-') - 1))
+     ELSE sr.Teamwork_and_Collaboration_Score
+END as Teamwork_and_Collaboration_Score,
+CASE WHEN STRPOS(sr.Learn_and_Grow_Score, '-') > 0 
+     THEN TRIM(SUBSTR(sr.Learn_and_Grow_Score,1,STRPOS(sr.Learn_and_Grow_Score,'-') - 1))
+     ELSE sr.Learn_and_Grow_Score
+END as Learn_and_Grow_Score,
+CASE WHEN STRPOS(sr.Accountability_Score, '-') > 0 
+     THEN TRIM(SUBSTR(sr.Accountability_Score,1,STRPOS(sr.Accountability_Score,'-')  - 1))
+     ELSE sr.Accountability_Score
+END as Accountability_Score,
+CASE WHEN STRPOS(sr.Goal_1_Score, '-') > 0 
+     THEN TRIM(SUBSTR(sr.Goal_1_Score,1,STRPOS(sr.Goal_1_Score,'-') - 1)) 
+     ELSE sr.Goal_1_Score
+END as Goal_1_Score,
+CASE WHEN STRPOS(sr.Goal_2_Score, '-') > 0 
+     THEN TRIM(SUBSTR(sr.Goal_2_Score,1,STRPOS(sr.Goal_2_Score,'-') - 1)) 
+     ELSE sr.Goal_2_Score
+END as Goal_2_Score,
+CASE WHEN STRPOS(sr.Goal_3_Score, '-') > 0 
+     THEN TRIM(SUBSTR(sr.Goal_3_Score,1,STRPOS(sr.Goal_3_Score,'-') - 1)) 
+     ELSE sr.Goal_3_Score
+END as Goal_3_Score,
+-- CASE 
+--   WHEN (SUBSTR(sr.accountability_score,1,1) = 'N' OR SUBSTR(sr.communication_score,1,1) ='N' OR SUBSTR(sr.learn_and_grow_score,1,1) = 'N' OR SUBSTR(sr.teamwork_and_collaboration_score,1,1) = 'N')
+--     THEN "Not Rated"
+--   ELSE
+--   CAST(ROUND(((CAST(SUBSTR(sr.accountability_score,1,3) AS NUMERIC) + CAST(SUBSTR(sr.communication_score,1,3) AS NUMERIC) + CAST(SUBSTR(sr.learn_and_grow_score,1,3) AS NUMERIC) + CAST(SUBSTR(sr.teamwork_and_collaboration_score,1,3) AS NUMERIC))/4),2) AS STRING)
+-- END AS behavioral_score,
+-- CASE 
+--   WHEN (SUBSTR(sr.goal_1_score,1,1) = 'N' OR SUBSTR(sr.goal_2_score,1,1) ='N' OR SUBSTR(sr.goal_3_score,1,1) = 'N')
+--     THEN "Not Rated"
+--   ELSE
+--   CAST(ROUND(((CAST(SUBSTR(sr.goal_1_score,1,3) AS NUMERIC) + CAST(SUBSTR(sr.goal_2_score,1,3) AS NUMERIC) + CAST(SUBSTR(sr.goal_3_score,1,3) AS NUMERIC))/3),2) AS STRING)
+-- END AS goal_score,
+sl.employee_link,
+sl.supervisor_link,
+er.review,
+er.comments,
+CAST((CASE 
+  WHEN gc.perfplan_id IS NULL THEN "No current active formatted performance plan in place"
+  WHEN er.Timestamp IS NOT NULL THEN "You have already responded this quarter."
+  WHEN (gc.perfplan_id IS NOT NULL AND sr.timestamp IS NOT NULL) THEN sl.employee_link
+  ELSE "Your supervisor has not yet submitted a quarterly performance review."
+END) AS string) AS link_mask,
+CAST((CASE 
+  WHEN gc.perfplan_id IS NULL THEN "No current active formatted performance plan in place"
+  WHEN sr.Timestamp IS NOT NULL THEN "You have already completed the form this quarter."
+  WHEN (gc.perfplan_id IS NOT NULL AND sr.timestamp IS NULL) THEN sl.supervisor_link
+  ELSE "Error"
+END) AS string) AS link_mask_supervisor,
+RIGHT(sl.submission_code,9) AS survey_quarter_plan_fy
+FROM `ut-dhrm-udot-datashare-prod.employee_data.employee_data` AS ed1
+LEFT JOIN goal_complete AS gc
+ON ed1.employee_pk = gc.employee_pk
+LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.employee_data` AS sd1
+ON ed1.supervisor_employee_pk = sd1.employee_pk
+LEFT JOIN `ut-udot-adap-dev.upm.2025R1_supervisor` AS sr --Update this to point to new quarter's forms. Naming convention is YYYYQ#_supervisor. Tables used here before updating (after the first quarter) get used in the new historical subqueries and unions added each quarter.
+ON CAST(ed1.employee_pk AS STRING) = (SUBSTR(sr.Submission_Code, 3, 6))
+LEFT JOIN `ut-udot-adap-dev.upm.2025R1_links` AS sl --Update this to point to new quarter's forms. Naming convention is YYYYQ#_links.  Tables used here before updating (after the first quarter) get used in the new historical subqueries and unions added each quarter.
+ON ed1.employee_pk = sl.employee_pk
+LEFT JOIN `ut-udot-adap-dev.upm.2025R1_employee` AS er --Update this to point to new quarter's forms. Naming convention is YYYYQ#_employee.  Tables used here before updating (aftert the first quarter) get used in the new historical subqueries and unions added each quarter.
+ON CAST(ed1.employee_pk AS STRING) = (SUBSTR(er.Submission_Code, 3, 6))
+WHERE ed1.employee_status IN ("Active", "Leave Without Pay")
+AND ed1.agency = 810
+  -- AND (DATE_DIFF(CURRENT_DATE, ed1.current_hire_date, day) < 29 and gc.PERFPLAN_ID is not null)  
+  -- OR DATE_DIFF(CURRENT_DATE, ed1.current_hire_date, day) > 29 --2024/6/4 Added to attempt to bring in folks that haven't been here for 30 days, but have a plan.
+),--select * from combo where employee_pk = 236283
+
+
+-- historic_data_q1fy2024 AS ( --Will add a new version of this each quarter for the newest historical quarter (so this will not be included in first quarter)
+--   SELECT
+--   SUBSTR(slq1.submission_code,3,6) AS employee_pk,
+--   edq1.work_email,
+--   edq1.preferred_first_name,
+--   edq1.last_name,
+--   edq1.org,
+--   RIGHT(slq1.submission_code,4) AS plan_fy,  --rename if not fy, make sure update generator sql if not by fy (or not, to make dashboards easier, just rename in there?)
+--   RIGHT(slq1.submission_code,9) AS survey_quarter_plan_fy,  --rename if not fy, make sure update generator sql if not by fy (or not, to make dashboards easier, just rename in there?)
+--   LEFT(slq1.submission_code,1) AS performance_evaluation_required,
+--   SUBSTR(slq1.submission_code,17,6) AS supervisor_employee_pk,
+--   sedq1.work_email AS supervisor_work_email, --brings in current sup, not historic, this is on purpose!
+--   sedq1.preferred_first_name AS supervisor_preferred_first_name, --brings in current sup, not historic, this is on purpose!
+--   sedq1.last_name AS supervisor_last_name, --brings in current sup, not historic, this is on purpose!
+--   SUBSTR(slq1.submission_code,24,6) AS perfplan_id,
+--   slq1.goal1,
+--   slq1.goal2,
+--   slq1.goal3,
+--   wsr1.Goal_1_Score,
+--   wsr1.Goal_2_Score,
+--   wsr1.Goal_3_Score,
+--   wsr1.Communication_Score,
+--   wsr1.Learn_and_Grow_Score,
+--   wsr1.Teamwork_and_Collaboration_Score,
+--   wsr1.Accountability_Score,
+--   wsr1.Goal_1_Comments___Not_required,
+--   wsr1.Goal_1_Comments___Required,
+--   wsr1.Goal_2_Comments___Not_required,
+--   wsr1.Goal_2_Comments___Required,
+--   wsr1.Goal_3_Comments___Not_required,
+--   wsr1.Goal_3_Comments___Required,
+--   wsr1.Communication_Score___Optional_Comments,
+--   wsr1.Communication_Score___Required_Comments,
+--   wsr1.Learn_and_Grow_Score____Optional_Comments,
+--   wsr1.Learn_and_Grow_Score____Required_Comments,
+--   wsr1.Teamwork_and_Collaboration_Score___Optional_Comments,
+--   wsr1.Teamwork_and_Collaboration_Score___Required_Comments,
+--   wsr1.Accountability_Score___Optional_Comments,
+--   wsr1.Accountability_Score___Required_Comments,
+--   CASE WHEN (SUBSTR(wsr1.accountability_score,1,1) = 'N' OR SUBSTR(wsr1.communication_score,1,1) ='N' OR SUBSTR(wsr1.learn_and_grow_score,1,1) = 'N' OR SUBSTR(wsr1.teamwork_and_collaboration_score,1,1) = 'N')
+--     THEN "Not Rated"
+--   ELSE
+--   CAST(ROUND(((CAST(SUBSTR(wsr1.accountability_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr1.communication_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr1.learn_and_grow_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr1.teamwork_and_collaboration_score,1,1) AS NUMERIC))/4),2) AS STRING)
+--   END AS behavioral_score,
+--   CASE WHEN (SUBSTR(wsr1.goal_1_score,1,1) = 'N' OR SUBSTR(wsr1.goal_2_score,1,1) ='N' OR SUBSTR(wsr1.goal_3_score,1,1) = 'N')
+--     THEN "Not Rated"
+--   ELSE
+--   CAST(ROUND(((CAST(SUBSTR(wsr1.goal_1_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr1.goal_2_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr1.goal_3_score,1,1) AS NUMERIC))/3),2) AS STRING)
+--   END AS goal_score,
+--   eqr1.review,
+--   eqr1.comments,
+--   wsr1.timestamp
+--   FROM  `ut-udot-adap-dev.secure_analytics.2024Q1_links` AS slq1 --Update this to point to last quarter's forms/tables (the ones that were for the current quarter section last quarter).  Naming convention is YYYYQ#_links.
+--   LEFT JOIN `ut-udot-adap-dev.secure_analytics.2024Q1_supervisor` AS wsr1 --Update this to point to last quarter's forms/tables (the ones that were for the current quarter section last quarter).  Naming convention is YYYYQ#_supervisor.
+--   ON SUBSTR(wsr1.Submission_Code,3,6) = CAST(slq1.employee_pk AS STRING)
+--   LEFT JOIN `ut-udot-adap-dev.secure_analytics.2024Q1_employee` AS eqr1 --Update this to point to last quarter's forms/tables (the ones that were for the current quarter section last quarter).  Naming convention is YYYYQ#_employee.
+--   ON SUBSTR(eqr1.Submission_Code,3,6) = CAST(slq1.employee_pk AS STRING)
+--   JOIN `ut-dhrm-udot-datashare-prod.employee_data.employee_data` AS edq1--Changed from Left to full join to remove staff who have terminated 2024-02-15
+--   ON edq1.employee_pk = slq1.employee_pk
+--   JOIN `ut-dhrm-udot-datashare-prod.employee_data.employee_data` AS sedq1--Changed from Left to full join to remove staff who have terminated 2024-02-15
+--   ON sedq1.employee_pk = edq1.supervisor_employee_pk
+--   Where edq1.employee_status IN ('Active','Leave Without Pay') --to remove staff who have terminated 2024-02-15
+-- ),
+
+-- historic_data_q2fy2024 AS ( --Will add a new version of this each quarter for the newest historical quarter
+--   SELECT
+--   SUBSTR(slq2.submission_code,3,6) AS employee_pk,
+--   edq2.work_email,
+--   edq2.preferred_first_name,
+--   edq2.last_name,
+--   edq2.org,
+--   RIGHT(slq2.submission_code,4) AS plan_fy,  --rename if not fy, make sure update generator sql if not by fy (or not, to make dashboards easier, just rename in there?)
+--   RIGHT(slq2.submission_code,9) AS survey_quarter_plan_fy,  --rename if not fy, make sure update generator sql if not by fy (or not, to make dashboards easier, just rename in there?)
+--   LEFT(slq2.submission_code,1) AS performance_evaluation_required,
+--   SUBSTR(slq2.submission_code,17,6) AS supervisor_employee_pk,
+--   sedq2.work_email AS supervisor_work_email, --brings in current sup, not historic, this is on purpose!
+--   sedq2.preferred_first_name AS supervisor_preferred_first_name, --brings in current sup, not historic, this is on purpose!
+--   sedq2.last_name AS supervisor_last_name, --brings in current sup, not historic, this is on purpose!
+--   SUBSTR(slq2.submission_code,24,6) AS perfplan_id,
+--   slq2.goal1,
+--   slq2.goal2,
+--   slq2.goal3,
+--   wsr2.Goal_1_Score,
+--   wsr2.Goal_2_Score,
+--   wsr2.Goal_3_Score,
+--   wsr2.Communication_Score,
+--   wsr2.Learn_and_Grow_Score,
+--   wsr2.Teamwork_and_Collaboration_Score,
+--   wsr2.Accountability_Score,
+--   wsr2.Goal_1_Comments___Not_required,
+--   wsr2.Goal_1_Comments___Required,
+--   wsr2.Goal_2_Comments___Not_required,
+--   wsr2.Goal_2_Comments___Required,
+--   wsr2.Goal_3_Comments___Not_required,
+--   wsr2.Goal_3_Comments___Required,
+--   wsr2.Communication_Score___Optional_Comments,
+--   wsr2.Communication_Score___Required_Comments,
+--   wsr2.Learn_and_Grow_Score____Optional_Comments,
+--   wsr2.Learn_and_Grow_Score____Required_Comments,
+--   wsr2.Teamwork_and_Collaboration_Score___Optional_Comments,
+--   wsr2.Teamwork_and_Collaboration_Score___Required_Comments,
+--   wsr2.Accountability_Score___Optional_Comments,
+--   wsr2.Accountability_Score___Required_Comments,
+--   CASE WHEN (SUBSTR(wsr2.accountability_score,1,1) = 'N' OR SUBSTR(wsr2.communication_score,1,1) ='N' OR SUBSTR(wsr2.learn_and_grow_score,1,1) = 'N' OR SUBSTR(wsr2.teamwork_and_collaboration_score,1,1) = 'N')
+--     THEN "Not Rated"
+--   ELSE
+--   CAST(ROUND(((CAST(SUBSTR(wsr2.accountability_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr2.communication_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr2.learn_and_grow_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr2.teamwork_and_collaboration_score,1,1) AS NUMERIC))/4),2) AS STRING)
+--   END AS behavioral_score,
+--   CASE WHEN (SUBSTR(wsr2.goal_1_score,1,1) = 'N' OR SUBSTR(wsr2.goal_2_score,1,1) ='N' OR SUBSTR(wsr2.goal_3_score,1,1) = 'N')
+--     THEN "Not Rated"
+--   ELSE
+--   CAST(ROUND(((CAST(SUBSTR(wsr2.goal_1_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr2.goal_2_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr2.goal_3_score,1,1) AS NUMERIC))/3),2) AS STRING)
+--   END AS goal_score,
+--   eqr2.review,
+--   eqr2.comments,
+--   wsr2.timestamp
+--   FROM  `ut-udot-adap-dev.secure_analytics.2024Q2_links` AS slq2 --Update this to point to last quarter's forms/tables (the ones that were for the current quarter section last quarter).  Naming convention is YYYYQ#_links.
+--   LEFT JOIN `ut-udot-adap-dev.secure_analytics.2024Q2_supervisor` AS wsr2 --Update this to point to last quarter's forms/tables (the ones that were for the current quarter section last quarter).  Naming convention is YYYYQ#_supervisor.
+--   ON SUBSTR(wsr2.Submission_Code,3,6) = CAST(slq2.employee_pk AS STRING)
+--   LEFT JOIN `ut-udot-adap-dev.secure_analytics.2024Q2_employee` eqr2 --Update this to point to last quarter's forms/tables (the ones that were for the current quarter section last quarter).  Naming convention is YYYYQ#_employee.
+--   ON SUBSTR(eqr2.Submission_Code,3,6) = CAST(slq2.employee_pk AS STRING)
+--   JOIN `ut-dhrm-udot-datashare-prod.employee_data.employee_data` AS edq2--Changed from Left to full join to remove staff who have terminated 2024-02-15
+--   ON edq2.employee_pk = slq2.employee_pk
+--   JOIN `ut-dhrm-udot-datashare-prod.employee_data.employee_data` AS sedq2--Changed from Left to full join to remove staff who have terminated 2024-02-15
+--   ON sedq2.employee_pk = edq2.supervisor_employee_pk
+--   Where edq2.employee_status IN ('Active','Leave Without Pay') --to remove staff who have terminated 2024-02-15
+--   --WHERE SUBSTR(slq2.submission_code,3,6) = '207179' -- for testing purposes
+-- ),
+
+-- historic_data_q3fy2024 AS ( --Will add a new version of this each quarter for the newest historical quarter
+--   SELECT
+--   SUBSTR(slq3.submission_code,3,6) AS employee_pk,
+--   edq3.work_email,
+--   edq3.preferred_first_name,
+--   edq3.last_name,
+--   edq3.org,
+--   RIGHT(slq3.submission_code,4) AS plan_fy,  --rename if not fy, make sure update generator sql if not by fy (or not, to make dashboards easier, just rename in there?)
+--   RIGHT(slq3.submission_code,9) AS survey_quarter_plan_fy,  --rename if not fy, make sure update generator sql if not by fy (or not, to make dashboards easier, just rename in there?)
+--   LEFT(slq3.submission_code,1) AS performance_evaluation_required,
+--   SUBSTR(slq3.submission_code,17,6) AS supervisor_employee_pk,
+--   sedq3.work_email AS supervisor_work_email, --brings in current sup, not historic, this is on purpose!
+--   sedq3.preferred_first_name AS supervisor_preferred_first_name, --brings in current sup, not historic, this is on purpose!
+--   sedq3.last_name AS supervisor_last_name, --brings in current sup, not historic, this is on purpose!
+--   SUBSTR(slq3.submission_code,24,6) AS perfplan_id,
+--   slq3.goal1,
+--   slq3.goal2,
+--   slq3.goal3,
+--   wsr3.Goal_1_Score,
+--   wsr3.Goal_2_Score,
+--   wsr3.Goal_3_Score,
+--   wsr3.Communication_Score,
+--   wsr3.Learn_and_Grow_Score,
+--   wsr3.Teamwork_and_Collaboration_Score,
+--   wsr3.Accountability_Score,
+--   wsr3.Goal_1_Comments___Not_required,
+--   wsr3.Goal_1_Comments___Required,
+--   wsr3.Goal_2_Comments___Not_required,
+--   wsr3.Goal_2_Comments___Required,
+--   wsr3.Goal_3_Comments___Not_required,
+--   wsr3.Goal_3_Comments___Required,
+--   wsr3.Communication_Score___Optional_Comments,
+--   wsr3.Communication_Score___Required_Comments,
+--   wsr3.Learn_and_Grow_Score____Optional_Comments,
+--   wsr3.Learn_and_Grow_Score____Required_Comments,
+--   wsr3.Teamwork_and_Collaboration_Score___Optional_Comments,
+--   wsr3.Teamwork_and_Collaboration_Score___Required_Comments,
+--   wsr3.Accountability_Score___Optional_Comments,
+--   wsr3.Accountability_Score___Required_Comments,
+--   CASE WHEN (SUBSTR(wsr3.accountability_score,1,1) = 'N' OR SUBSTR(wsr3.communication_score,1,1) ='N' OR SUBSTR(wsr3.learn_and_grow_score,1,1) = 'N' OR SUBSTR(wsr3.teamwork_and_collaboration_score,1,1) = 'N')
+--     THEN "Not Rated"
+--   ELSE
+--   CAST(ROUND(((CAST(SUBSTR(wsr3.accountability_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr3.communication_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr3.learn_and_grow_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr3.teamwork_and_collaboration_score,1,1) AS NUMERIC))/4),2) AS STRING)
+--   END AS behavioral_score,
+--   CASE WHEN (SUBSTR(wsr3.goal_1_score,1,1) = 'N' OR SUBSTR(wsr3.goal_2_score,1,1) ='N' OR SUBSTR(wsr3.goal_3_score,1,1) = 'N')
+--     THEN "Not Rated"
+--   ELSE
+--   CAST(ROUND(((CAST(SUBSTR(wsr3.goal_1_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr3.goal_2_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr3.goal_3_score,1,1) AS NUMERIC))/3),2) AS STRING)
+--   END AS goal_score,
+--   eqr3.review,
+--   eqr3.comments,
+--   wsr3.timestamp,
+--   CAST((CASE 
+--   WHEN gc.perfplan_id IS NULL THEN "No current active formatted performance plan in place"
+--   WHEN eqr3.Timestamp IS NOT NULL THEN "You have already responded this quarter."
+--   WHEN (gc.perfplan_id IS NOT NULL AND wsr3.timestamp IS NOT NULL) THEN slq3.employee_link
+--   ELSE "Your supervisor has not yet submitted a quarterly performance review."
+-- END) AS string) AS link_mask,
+-- CAST((CASE 
+--   WHEN gc.perfplan_id IS NULL THEN "No current active formatted performance plan in place"
+--   WHEN wsr3.Timestamp IS NOT NULL THEN "You have already completed the form this quarter."
+--   WHEN (gc.perfplan_id IS NOT NULL AND wsr3.timestamp IS NULL) THEN slq3.supervisor_link
+--   ELSE "Error"
+-- END) AS string) AS link_mask_supervisor,
+-- --RIGHT(slq3.submission_code,9) AS survey_quarter_plan_fy
+-- FROM  `ut-udot-adap-dev.secure_analytics.2024Q3_links` AS slq3 --Update this to point to last quarter's forms/tables (the ones that were for the current quarter section last quarter).  Naming convention is YYYYQ#_links.
+-- LEFT JOIN `ut-udot-adap-dev.secure_analytics.2024Q3_supervisor` AS wsr3 --Update this to point to last quarter's forms/tables (the ones that were for the current quarter section last quarter).  Naming convention is YYYYQ#_supervisor.
+-- ON SUBSTR(wsr3.Submission_Code,3,6) = CAST(slq3.employee_pk AS STRING)
+-- LEFT JOIN `ut-udot-adap-dev.secure_analytics.2024Q3_employee` AS eqr3 --Update this to point to last quarter's forms/tables (the ones that were for the current quarter section last quarter).  Naming convention is YYYYQ#_employee.
+-- ON SUBSTR(eqr3.Submission_Code,3,6) = CAST(slq3.employee_pk AS STRING)
+-- LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.employee_data` AS edq3
+-- ON edq3.employee_pk = slq3.employee_pk
+-- LEFT JOIN goal_complete gc ON edq3.employee_pk = gc.employee_pk
+-- LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.employee_data` AS sedq3
+-- ON sedq3.employee_pk = edq3.supervisor_employee_pk
+--WHERE SUBSTR(slq3.submission_code,3,6) = '207179' -- for testing purposes
+--),--Select * From historic_data_q3fy2024 Where employee_pk = '162839' goal 3 score working here
+
+-- historic_data_q4fy2024 AS ( --Will add a new version of this each quarter for the newest historical quarter within each FY (so this will not be included in first quarter)
+--   SELECT
+--   SUBSTR(slq4.submission_code,3,6) AS employee_pk,
+--   edq4.work_email,
+--   edq4.preferred_first_name,
+--   edq4.last_name,
+--   edq4.org,
+--   RIGHT(slq4.submission_code,4) AS plan_fy,  --rename if not fy, make sure update generator sql if not by fy (or not, to make dashboards easier, just rename in there?)
+--   RIGHT(slq4.submission_code,9) AS survey_quarter_plan_fy,  --rename if not fy, make sure update generator sql if not by fy (or not, to make dashboards easier, just rename in there?)
+--   LEFT(slq4.submission_code,1) AS performance_evaluation_required,
+--   SUBSTR(slq4.submission_code,17,6) AS supervisor_employee_pk,
+--   sedq4.work_email AS supervisor_work_email, --brings in current sup, not historic, this is on purpose!
+--   sedq4.preferred_first_name AS supervisor_preferred_first_name, --brings in current sup, not historic, this is on purpose!
+--   sedq4.last_name AS supervisor_last_name, --brings in current sup, not historic, this is on purpose!
+--   SUBSTR(slq4.submission_code,24,6) AS perfplan_id,
+--   slq4.goal1,
+--   slq4.goal2,
+--   slq4.goal3,
+--   wsr4.Goal_1_Score,
+--   wsr4.Goal_2_Score,
+--   wsr4.Goal_3_Score,
+--   wsr4.Communication_Score,
+--   wsr4.Learn_and_Grow_Score,
+--   wsr4.Teamwork_and_Collaboration_Score,
+--   wsr4.Accountability_Score,
+--   wsr4.Goal_1_Comments___Not_required,
+--   wsr4.Goal_1_Comments___Required,
+--   wsr4.Goal_2_Comments___Not_required,
+--   wsr4.Goal_2_Comments___Required,
+--   wsr4.Goal_3_Comments___Not_required,
+--   wsr4.Goal_3_Comments___Required,
+--   wsr4.Communication_Score___Optional_Comments,
+--   wsr4.Communication_Score___Required_Comments,
+--   wsr4.Learn_and_Grow_Score____Optional_Comments,
+--   wsr4.Learn_and_Grow_Score____Required_Comments,
+--   wsr4.Teamwork_and_Collaboration_Score___Optional_Comments,
+--   wsr4.Teamwork_and_Collaboration_Score___Required_Comments,
+--   wsr4.Accountability_Score___Optional_Comments,
+--   wsr4.Accountability_Score___Required_Comments,
+--   CASE WHEN (SUBSTR(wsr4.accountability_score,1,1) = 'N' OR SUBSTR(wsr4.communication_score,1,1) ='N' OR SUBSTR(wsr4.learn_and_grow_score,1,1) = 'N' OR SUBSTR(wsr4.teamwork_and_collaboration_score,1,1) = 'N')
+--     THEN "Not Rated"
+--   ELSE
+--   CAST(ROUND(((CAST(SUBSTR(wsr4.accountability_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr4.communication_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr4.learn_and_grow_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr4.teamwork_and_collaboration_score,1,1) AS NUMERIC))/4),2) AS STRING)
+--   END AS behavioral_score,
+--   CASE WHEN (SUBSTR(wsr4.goal_1_score,1,1) = 'N' OR SUBSTR(wsr4.goal_2_score,1,1) ='N' OR SUBSTR(wsr4.goal_3_score,1,1) = 'N')
+--     THEN "Not Rated"
+--   ELSE
+--   CAST(ROUND(((CAST(SUBSTR(wsr4.goal_1_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr4.goal_2_score,1,1) AS NUMERIC) + CAST(SUBSTR(wsr4.goal_3_score,1,1) AS NUMERIC))/3),2) AS STRING)
+--   END AS goal_score,
+--   eqr4.review,
+--   eqr4.comments,
+--   wsr4.timestamp
+--   FROM `ut-udot-adap-dev.secure_analytics.quarterly_perf_sup_links` AS slq4 --Update this to point to last quarter's forms/tables (the ones that were for the current quarter section last quarter).  Naming convention is YYYYQ#_links.
+--   LEFT JOIN `ut-udot-adap-dev.secure_analytics.working_version3_upm_supervisor_responses` AS wsr4 --Update this to point to last quarter's forms/tables (the ones that were for the current quarter section last quarter). Naming convention is YYYYQ#_supervisor.
+--   ON SUBSTR(wsr4.Submission_Code,3,6) = CAST(slq4.employee_pk AS STRING)
+--   LEFT JOIN `ut-udot-adap-dev.secure_analytics.upm_employee_quarterly_responses` eqr4 --Update this to point to last quarter's forms/tables (the ones that were for the current quarter section last quarter).  Naming convention is YYYYQ#_employee.
+--   ON SUBSTR(eqr4.Submission_Code,3,6) = CAST(slq4.employee_pk AS STRING)
+--   LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.employee_data` AS edq4
+--   ON edq4.employee_pk = slq4.employee_pk
+--   LEFT JOIN `ut-dhrm-udot-datashare-prod.employee_data.employee_data` AS sedq4
+--   ON sedq4.employee_pk = edq4.supervisor_employee_pk
+--   --WHERE SUBSTR(slq4.submission_code,3,6) = '207179' -- for testing purposes
+-- )
+--,
+
+final as(
+SELECT
+c.employee_pk,
+CONCAT(c.preferred_first_name," ",c.last_name) AS full_name,
+c.work_email,
+c.org,
+c.plan_fy,
+c.survey_quarter_plan_fy,
+c.performance_evaluation_required,
+c.supervisor_employee_pk,
+CONCAT(c.supervisor_preferred_first_name," ",c.supervisor_last_name) AS supervisor_name,
+c.supervisor_work_email,
+CAST(c.perfplan_id AS STRING) AS perfplan_id,
+c.outofdraft,
+c.goal1,
+c.goal2,
+c.goal3,
+CASE WHEN c.perfplan_id IS NOT NULL
+THEN CASE WHEN (c.goal1 IS NOT NULL AND c.goal2 IS NOT NULL AND c.goal3 IS NOT NULL) THEN "Properly formatted plan for current FY in place."
+  ELSE "Incomplete/improperly formatted plan for current FY in place."
+  END
+  ELSE "No performance plan for current FY in place."
+  END AS perf_plan_status, --2023/12/6 Added for the Performance Dashboard scalability
+c.Goal_1_Score,
+c.Goal_2_Score,
+c.Goal_3_Score,
+c.Communication_Score,
+c.Learn_and_Grow_Score,
+c.Teamwork_and_Collaboration_Score,
+c.Accountability_Score,
+CASE
+  WHEN c.Communication_Score||'|'||c.Teamwork_and_Collaboration_Score||'|'||Learn_and_Grow_Score||'|'||c.Accountability_Score||'|'||c.Goal_1_Score
+       ||'|'||c.Goal_2_Score||'|'||Goal_3_Score LIKE '%1%'
+  THEN 'Y'
+  ELSE 'N'
+END AS needs_development_score_flag,
+
+-- CASE
+--   WHEN TRIM(SUBSTR(c.Communication_Score,1,STRPOS(c.Communication_Score,'-') - 1))
+--       ||'|'||TRIM(SUBSTR(c.Teamwork_and_Collaboration_Score,1,STRPOS(c.Teamwork_and_Collaboration_Score,'-') - 1))
+--       ||'|'||TRIM(SUBSTR(c.Learn_and_Grow_Score,1,STRPOS(c.Learn_and_Grow_Score,'-') - 1))
+--       ||'|'||TRIM(SUBSTR(c.Accountability_Score,1,STRPOS(c.Accountability_Score,'-')  - 1))
+--       ||'|'||TRIM(SUBSTR(c.Goal_1_Score,1,STRPOS(c.Goal_1_Score,'-') - 1))
+--       ||'|'||TRIM(SUBSTR(c.Goal_2_Score,1,STRPOS(c.Goal_2_Score,'-') - 1))
+--       ||'|'||TRIM(SUBSTR(c.Goal_3_Score,1,STRPOS(c.Goal_3_Score,'-') - 1)) LIKE '%1%'
+--   THEN 'Y'
+--   ELSE 'N'
+-- END AS needs_development_score_flag,--Attempt to pull in half scores
+-- CASE
+--   WHEN SUBSTR(c.Communication_Score,1,3)||'|'||SUBSTR(c.Teamwork_and_Collaboration_Score,1,3)||'|'||SUBSTR(c.Learn_and_Grow_Score,1,3)||'|'||SUBSTR(c.Accountability_Score,1,3)||'|'||
+--        SUBSTR(c.Goal_1_Score,1,3)||'|'||SUBSTR(c.Goal_2_Score,1,3)||'|'||SUBSTR(c.Goal_3_Score,1,3) LIKE '%1%'
+--     THEN 'Y'
+--   ELSE 'N'
+-- END AS needs_development_score_flag,
+c.Goal_1_Comments___Not_required,
+c.Goal_1_Comments___Required,
+c.Goal_2_Comments___Not_required,
+c.Goal_2_Comments___Required,
+c.Goal_3_Comments___Not_required,
+c.Goal_3_Comments___Required,
+c.Communication_Score___Optional_Comments,
+c.Communication_Score___Required_Comments,
+c.Learn_and_Grow_Score____Optional_Comments,
+c.Learn_and_Grow_Score____Required_Comments,
+c.Teamwork_and_Collaboration_Score___Optional_Comments,
+c.Teamwork_and_Collaboration_Score___Required_Comments,
+c.Accountability_Score___Optional_Comments,
+c.Accountability_Score___Required_Comments,
+CASE 
+  WHEN (SUBSTR(c.accountability_score,1,1) = 'N' OR SUBSTR(c.communication_score,1,1) ='N' OR SUBSTR(c.learn_and_grow_score,1,1) = 'N' OR SUBSTR(c.teamwork_and_collaboration_score,1,1) = 'N')
+    THEN "Not Rated"
+  ELSE
+  CAST(ROUND(((CAST(c.accountability_score AS NUMERIC) + CAST(c.communication_score AS NUMERIC) + CAST(c.learn_and_grow_score AS NUMERIC) + CAST(c.teamwork_and_collaboration_score AS NUMERIC))/4),2) AS STRING)
+END AS behavioral_score,
+CASE 
+  WHEN (SUBSTR(c.goal_1_score,1,1) = 'N' OR SUBSTR(c.goal_2_score,1,1) ='N' OR SUBSTR(c.goal_3_score,1,1) = 'N')
+    THEN "Not Rated"
+  ELSE
+  CAST(ROUND(((CAST(c.goal_1_score AS NUMERIC) + CAST(c.goal_2_score AS NUMERIC) + CAST(c.goal_3_score AS NUMERIC))/3),2) AS STRING)
+END AS goal_score,
+c.review,
+c.comments,
+c.timestamp,--sup review timestamp
+-- CASE WHEN (c.goal_score = 'Not Rated' OR c.behavioral_score = 'Not Rated')
+--   THEN 'Not Rated'
+-- ELSE
+--   --CAST((.75*CAST(c.goal_score AS NUMERIC)+.25*CAST(c.behavioral_score AS NUMERIC)) AS STRING)
+--   CAST(ROUND((0.75 * CAST(c.goal_score AS NUMERIC) + 0.25 * CAST(c.behavioral_score AS NUMERIC)), 2) AS STRING)
+-- END AS final_score,
+CASE WHEN CURRENT_DATE < DATE('2024-07-08')
+  THEN 'Evaluation available on July 8th' 
+  ELSE c.link_mask
+END AS link_mask,
+CASE WHEN CURRENT_DATE < DATE('2024-07-08')
+    THEN 'Evaluation available on July 8th' 
+    ELSE c.link_mask_supervisor
+END as link_mask_supervisor
+FROM combo AS c
+WHERE c.current_quarter = --if the case doesn't work for some reason, can just hard code and change from quarter to quarter
+  CASE
+    WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 10 AND EXTRACT(MONTH FROM CURRENT_DATE()) = 1 THEN "R3"
+    WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 1 AND EXTRACT(MONTH FROM CURRENT_DATE()) < 5 THEN "AS" 
+    WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 4 AND EXTRACT(MONTH FROM CURRENT_DATE()) < 8 THEN "R1"
+    WHEN EXTRACT(MONTH FROM CURRENT_DATE()) > 7 AND EXTRACT(MONTH FROM CURRENT_DATE()) < 11  THEN "R2"
+    ELSE "ERROR"
+  END)
+
+
+Select *,
+CASE WHEN (goal_score = 'Not Rated' OR behavioral_score = 'Not Rated')
+  THEN 'Not Rated'
+ELSE
+  --CAST((.75*CAST(c.goal_score AS NUMERIC)+.25*CAST(c.behavioral_score AS NUMERIC)) AS STRING)
+  CAST(ROUND((0.75 * CAST(goal_score AS NUMERIC) + 0.25 * CAST(behavioral_score AS NUMERIC)), 2) AS STRING)
+END AS final_score,
+from final --when you add a quarter, add the union into combo and then add this to the bottom. 
+where 0=0
+AND employee_pk = 236739
+--and employee_pk = 162839
+
+-- UNION ALL --Will add another union each quarter for the newest historical quarter
+
+-- SELECT
+-- CAST(hd1.employee_pk AS INT64) AS employee_pk,
+-- CONCAT(hd1.preferred_first_name," ",hd1.last_name) AS full_name,
+-- hd1.work_email,
+-- hd1.org,
+-- CAST(hd1.plan_fy AS INT64) AS plan_fy, --may need to change alias if not using fy (or not, to make dashboards easier, just rename in there?)
+-- hd1.survey_quarter_plan_fy, --may need to change alias if not using fy (or not, to make dashboards easier, just rename in there?)
+-- hd1.performance_evaluation_required,
+-- CAST(hd1.supervisor_employee_pk AS INT64) AS supervisor_employee_pk,
+-- CONCAT(hd1.supervisor_preferred_first_name," ",hd1.supervisor_last_name) AS supervisor_name,
+-- hd1.supervisor_work_email,
+-- hd1.perfplan_id,
+-- "Historic" AS outofdraft,
+-- hd1.goal1,
+-- hd1.goal2,
+-- hd1.goal3,
+-- CASE WHEN hd1.perfplan_id IS NOT NULL
+-- THEN CASE WHEN (hd1.goal1 IS NOT NULL AND hd1.goal2 IS NOT NULL AND hd1.goal3 IS NOT NULL) THEN "Properly formatted plan for current FY in place."
+--   ELSE "Incomplete/improperly formatted plan for current FY in place."
+--   END
+--   ELSE "No performance plan for current FY in place."
+--   END AS perf_plan_status,
+-- hd1.Goal_1_Score,
+-- hd1.Goal_2_Score,
+-- hd1.Goal_3_Score,
+-- hd1.Communication_Score,
+-- hd1.Learn_and_Grow_Score,
+-- hd1.Teamwork_and_Collaboration_Score,
+-- hd1.Accountability_Score,
+-- CASE
+--   WHEN SUBSTR(hd1.Communication_Score,1,1)||'|'||SUBSTR(hd1.Teamwork_and_Collaboration_Score,1,1)||'|'||SUBSTR(hd1.Learn_and_Grow_Score,1,1)||'|'||SUBSTR(hd1.Accountability_Score,1,1)||'|'||
+--        SUBSTR(hd1.Goal_1_Score,1,1)||'|'||SUBSTR(hd1.Goal_2_Score,1,1)||'|'||SUBSTR(hd1.Goal_3_Score,1,1) LIKE '%1%'
+--     THEN 'Y'
+--   ELSE 'N'
+-- END AS needs_development_score_flag,
+-- hd1.Goal_1_Comments___Not_required,
+-- hd1.Goal_1_Comments___Required,
+-- hd1.Goal_2_Comments___Not_required,
+-- hd1.Goal_2_Comments___Required,
+-- hd1.Goal_3_Comments___Not_required,
+-- hd1.Goal_3_Comments___Required,
+-- hd1.Communication_Score___Optional_Comments,
+-- hd1.Communication_Score___Required_Comments,
+-- hd1.Learn_and_Grow_Score____Optional_Comments,
+-- hd1.Learn_and_Grow_Score____Required_Comments,
+-- hd1.Teamwork_and_Collaboration_Score___Optional_Comments,
+-- hd1.Teamwork_and_Collaboration_Score___Required_Comments,
+-- hd1.Accountability_Score___Optional_Comments,
+-- hd1.Accountability_Score___Required_Comments,
+-- hd1.behavioral_score,
+-- hd1.goal_score,
+-- hd1.review,
+-- hd1.comments,
+-- hd1.timestamp, --sup review timestamp
+-- CASE WHEN (hd1.goal_score = 'Not Rated' OR hd1.behavioral_score = 'Not Rated')
+-- THEN 'Not Rated'
+-- ELSE
+-- --CAST((.75*CAST(hd1.goal_score AS NUMERIC)+.25*CAST(hd1.behavioral_score AS NUMERIC)) AS STRING)
+-- CAST(ROUND((0.75 * CAST(hd1.goal_score AS NUMERIC) + 0.25 * CAST(hd1.behavioral_score AS NUMERIC)), 2) AS STRING)-- 2023/12/5 Updated to round two decimals.
+-- END AS final_score,
+
+-- CASE WHEN hd1.goal1 is not null
+-- THEN "Quarter Completed - Response Period Closed"
+-- ELSE "Response Period Closed" 
+-- END AS link_mask,
+-- CASE WHEN hd1.goal1 is not null
+-- THEN "Quarter Completed - Response Period Closed"
+-- ELSE "Response Period Closed" 
+-- END AS link_mask_supervisor
+-- FROM historic_data_q1fy2024 AS hd1
+-- WHERE LEFT(hd1.survey_quarter_plan_fy,2) = "Q1"
+-- --AND employee_pk = '232395' --reflects historic quarter being brought in, update in the new pasted version below this to reflect the newest historical quarter (which was current quarter previously).
+
+-- UNION ALL
+
+-- SELECT
+-- CAST(hd2.employee_pk AS INT64) AS employee_pk,
+-- CONCAT(hd2.preferred_first_name," ",hd2.last_name) AS full_name,
+-- hd2.work_email,
+-- hd2.org,
+-- CAST(hd2.plan_fy AS INT64) AS plan_fy, --may need to change alias if not using fy (or not, to make dashboards easier, just rename in there?)
+-- hd2.survey_quarter_plan_fy, --may need to change alias if not using fy (or not, to make dashboards easier, just rename in there?)
+-- hd2.performance_evaluation_required,
+-- CAST(hd2.supervisor_employee_pk AS INT64) AS supervisor_employee_pk,
+-- CONCAT(hd2.supervisor_preferred_first_name," ",hd2.supervisor_last_name) AS supervisor_name,
+-- hd2.supervisor_work_email,
+-- hd2.perfplan_id,
+-- "Historic" AS outofdraft,
+-- hd2.goal1,
+-- hd2.goal2,
+-- hd2.goal3,
+-- CASE WHEN hd2.perfplan_id IS NOT NULL
+-- THEN CASE WHEN (hd2.goal1 IS NOT NULL AND hd2.goal2 IS NOT NULL AND hd2.goal3 IS NOT NULL) THEN "Properly formatted plan for current FY in place."
+--   ELSE "Incomplete/improperly formatted plan for current FY in place."
+--   END
+--   ELSE "No performance plan for current FY in place."
+--   END AS perf_plan_status, --2023/12/6 Added for the Performance Dashboard scalability
+-- hd2.Goal_1_Score,
+-- hd2.Goal_2_Score,
+-- hd2.Goal_3_Score,
+-- hd2.Communication_Score,
+-- hd2.Learn_and_Grow_Score,
+-- hd2.Teamwork_and_Collaboration_Score,
+-- hd2.Accountability_Score,
+-- CASE
+--   WHEN SUBSTR(hd2.Communication_Score,1,1)||'|'||SUBSTR(hd2.Teamwork_and_Collaboration_Score,1,1)||'|'||SUBSTR(hd2.Learn_and_Grow_Score,1,1)||'|'||SUBSTR(hd2.Accountability_Score,1,1)||'|'||
+--        SUBSTR(hd2.Goal_1_Score,1,1)||'|'||SUBSTR(hd2.Goal_2_Score,1,1)||'|'||SUBSTR(hd2.Goal_3_Score,1,1) LIKE '%1%'
+--     THEN 'Y'
+--   ELSE 'N'
+-- END AS needs_development_score_flag,
+-- hd2.Goal_1_Comments___Not_required,
+-- hd2.Goal_1_Comments___Required,
+-- hd2.Goal_2_Comments___Not_required,
+-- hd2.Goal_2_Comments___Required,
+-- hd2.Goal_3_Comments___Not_required,
+-- hd2.Goal_3_Comments___Required,
+-- hd2.Communication_Score___Optional_Comments,
+-- hd2.Communication_Score___Required_Comments,
+-- hd2.Learn_and_Grow_Score____Optional_Comments,
+-- hd2.Learn_and_Grow_Score____Required_Comments,
+-- hd2.Teamwork_and_Collaboration_Score___Optional_Comments,
+-- hd2.Teamwork_and_Collaboration_Score___Required_Comments,
+-- hd2.Accountability_Score___Optional_Comments,
+-- hd2.Accountability_Score___Required_Comments,
+-- hd2.behavioral_score,
+-- hd2.goal_score,
+-- hd2.review,
+-- hd2.comments,
+-- hd2.timestamp, --sup review timestamp
+-- CASE WHEN (hd2.goal_score = 'Not Rated' OR hd2.behavioral_score = 'Not Rated')
+--   THEN 'Not Rated'
+-- ELSE
+--   CAST(ROUND((0.75 * CAST(hd2.goal_score AS NUMERIC) + 0.25 * CAST(hd2.behavioral_score AS NUMERIC)), 2) AS STRING)
+-- END AS final_score,
+-- CASE WHEN hd2.goal1 is not null
+-- THEN "Quarter Completed - Response Period Closed"
+-- ELSE "Response Period Closed" 
+-- END AS link_mask,
+-- CASE WHEN hd2.goal1 is not null
+-- THEN "Quarter Completed - Response Period Closed"
+-- ELSE "Response Period Closed" 
+-- END AS link_mask_supervisor
+-- FROM historic_data_q2fy2024 AS hd2
+-- WHERE LEFT(hd2.survey_quarter_plan_fy,2) = "Q2" --reflects historic quarter being brought in, update in the new pasted version below this to reflect the newest historical quarter (which was current quarter previously).
+
+-- UNION ALL
+
+-- SELECT
+-- CAST(hd3.employee_pk AS INT64) AS employee_pk,
+-- CONCAT(hd3.preferred_first_name," ",hd3.last_name) AS full_name,
+-- hd3.work_email,
+-- hd3.org,
+-- CAST(hd3.plan_fy AS INT64) AS plan_fy, --may need to change alias if not using fy (or not, to make dashboards easier, just rename in there?)
+-- hd3.survey_quarter_plan_fy, --may need to change alias if not using fy (or not, to make dashboards easier, just rename in there?)
+-- hd3.performance_evaluation_required,
+-- CAST(hd3.supervisor_employee_pk AS INT64) AS supervisor_employee_pk,
+-- CONCAT(hd3.supervisor_preferred_first_name," ",hd3.supervisor_last_name) AS supervisor_name,
+-- hd3.supervisor_work_email,
+-- hd3.perfplan_id,
+-- "Historic" AS outofdraft,
+-- hd3.goal1,
+-- hd3.goal2,
+-- hd3.goal3,
+-- CASE WHEN hd3.perfplan_id IS NOT NULL
+-- THEN CASE WHEN (hd3.goal1 IS NOT NULL AND hd3.goal2 IS NOT NULL AND hd3.goal3 IS NOT NULL) THEN "Properly formatted plan for current FY in place."
+--   ELSE "Incomplete/improperly formatted plan for current FY in place."
+--   END
+--   ELSE "No performance plan for current FY in place."
+--   END AS perf_plan_status, --2023/12/6 Added for the Performance Dashboard scalability --This created an issue as the other UNIONS did not have this row in the same location moved 2024-04-04 to correct
+-- hd3.Goal_1_Score,
+-- hd3.Goal_2_Score,
+-- hd3.Goal_3_Score,
+-- hd3.Communication_Score,
+-- hd3.Learn_and_Grow_Score,
+-- hd3.Teamwork_and_Collaboration_Score,
+-- hd3.Accountability_Score,
+-- CASE
+--   WHEN SUBSTR(hd3.Communication_Score,1,1)||'|'||SUBSTR(hd3.Teamwork_and_Collaboration_Score,1,1)||'|'||SUBSTR(hd3.Learn_and_Grow_Score,1,1)||'|'||SUBSTR(hd3.Accountability_Score,1,1)||'|'||
+--        SUBSTR(hd3.Goal_1_Score,1,1)||'|'||SUBSTR(hd3.Goal_2_Score,1,1)||'|'||SUBSTR(hd3.Goal_3_Score,1,1) LIKE '%1%'
+--     THEN 'Y'
+--   ELSE 'N'
+-- END AS needs_development_score_flag,
+-- hd3.Goal_1_Comments___Not_required,
+-- hd3.Goal_1_Comments___Required,
+-- hd3.Goal_2_Comments___Not_required,
+-- hd3.Goal_2_Comments___Required,
+-- hd3.Goal_3_Comments___Not_required,
+-- hd3.Goal_3_Comments___Required,
+-- hd3.Communication_Score___Optional_Comments,
+-- hd3.Communication_Score___Required_Comments,
+-- hd3.Learn_and_Grow_Score____Optional_Comments,
+-- hd3.Learn_and_Grow_Score____Required_Comments,
+-- hd3.Teamwork_and_Collaboration_Score___Optional_Comments,
+-- hd3.Teamwork_and_Collaboration_Score___Required_Comments,
+-- hd3.Accountability_Score___Optional_Comments,
+-- hd3.Accountability_Score___Required_Comments,
+-- hd3.behavioral_score,
+-- hd3.goal_score,
+-- hd3.review,
+-- hd3.comments,
+-- hd3.timestamp, --sup review timestamp
+-- CASE WHEN (hd3.goal_score = 'Not Rated' OR hd3.behavioral_score = 'Not Rated')
+--   THEN 'Not Rated'
+-- ELSE
+--   CAST(ROUND((0.75 * CAST(hd3.goal_score AS NUMERIC) + 0.25 * CAST(hd3.behavioral_score AS NUMERIC)), 2) AS STRING)
+-- END AS final_score,
+-- --hd3.link_mask,
+-- --hd3.link_mask_supervisor
+-- CASE WHEN CURRENT_DATE < DATE('2024-04-07') and hd3.goal1 is not null THEN hd3.link_mask--Changed to 4-7 as this closed the links a day early 2024-04-05
+-- WHEN hd3.goal1 is not null
+-- THEN "Quarter Completed - Response Period Closed"
+-- ELSE "Response Period Closed" 
+-- END AS link_mask,
+-- CASE WHEN CURRENT_DATE < DATE('2024-04-07') and hd3.goal1 is not null THEN hd3.link_mask_supervisor--Changed to 4-7 as this closed the links a day early 2024-04-05
+-- WHEN hd3.goal1 is not null
+-- THEN "Quarter Completed - Response Period Closed"
+-- ELSE "Response Period Closed" 
+-- END AS link_mask_supervisor
+-- FROM historic_data_q3fy2024 AS hd3
+-- WHERE LEFT(hd3.survey_quarter_plan_fy,2) = "Q3") --reflects historic quarter being brought in, update in the new pasted version below this to reflect the newest historical quarter (which was current quarter previously).
+
+
+
+
+-- UNION ALL
+
+-- SELECT
+-- CAST(hd4.employee_pk AS INT64) AS employee_pk,
+-- CONCAT(hd4.preferred_first_name," ",hd4.last_name) AS full_name,
+-- hd4.work_email,
+-- hd4.org,
+-- CAST(hd4.plan_fy AS INT64) AS plan_fy, --may need to change alias if not using fy (or not, to make dashboards easier, just rename in there?)
+-- hd4.survey_quarter_plan_fy, --may need to change alias if not using fy (or not, to make dashboards easier, just rename in there?)
+-- hd4.performance_evaluation_required,
+-- CAST(hd4.supervisor_employee_pk AS INT64) AS supervisor_employee_pk,
+-- CONCAT(hd4.supervisor_preferred_first_name," ",hd4.supervisor_last_name) AS supervisor_name,
+-- hd4.supervisor_work_email,
+-- hd4.perfplan_id,
+-- "Historic" AS outofdraft,
+-- hd4.goal1,
+-- hd4.goal2,
+-- hd4.goal3,
+-- hd4.Goal_1_Score,
+-- hd4.Goal_2_Score,
+-- hd4.Goal_3_Score,
+-- CASE WHEN hd4.perfplan_id IS NOT NULL
+-- THEN CASE WHEN (hd3.goal1 IS NOT NULL AND hd4.goal2 IS NOT NULL AND hd4.goal3 IS NOT NULL) THEN "Properly formatted plan for current FY in place."
+--   ELSE "Incomplete/improperly formatted plan for current FY in place."
+--   END
+--   ELSE "No performance plan for current FY in place."
+--   END AS perf_plan_status, --2023/12/6 Added for the Performance Dashboard scalability
+-- hd4.Communication_Score,
+-- hd4.Learn_and_Grow_Score,
+-- hd4.Teamwork_and_Collaboration_Score,
+-- hd4.Accountability_Score,
+-- CASE
+--   WHEN SUBSTR(hd4.Communication_Score,1,1)||'|'||SUBSTR(hd4.Teamwork_and_Collaboration_Score,1,1)||'|'||SUBSTR(hd4.Learn_and_Grow_Score,1,1)||'|'||SUBSTR(hd4.Accountability_Score,1,1)||'|'||
+--        SUBSTR(hd4.Goal_1_Score,1,1)||'|'||SUBSTR(hd4.Goal_2_Score,1,1)||'|'||SUBSTR(hd4.Goal_3_Score,1,1) LIKE '%1%'
+--     THEN 'Y'
+--   ELSE 'N'
+-- END AS needs_development_score_flag,
+-- hd4.Goal_1_Comments___Not_required,
+-- hd4.Goal_1_Comments___Required,
+-- hd4.Goal_2_Comments___Not_required,
+-- hd4.Goal_2_Comments___Required,
+-- hd4.Goal_3_Comments___Not_required,
+-- hd4.Goal_3_Comments___Required,
+-- hd4.Communication_Score___Optional_Comments,
+-- hd4.Communication_Score___Required_Comments,
+-- hd4.Learn_and_Grow_Score____Optional_Comments,
+-- hd4.Learn_and_Grow_Score____Required_Comments,
+-- hd4.Teamwork_and_Collaboration_Score___Optional_Comments,
+-- hd4.Teamwork_and_Collaboration_Score___Required_Comments,
+-- hd4.Accountability_Score___Optional_Comments,
+-- hd4.Accountability_Score___Required_Comments,
+-- hd4.behavioral_score,
+-- hd4.goal_score,
+-- hd4.review,
+-- hd4.comments,
+-- hd4.timestamp, --sup review timestamp
+-- CASE WHEN (hd4.goal_score = 'Not Rated' OR hd4.behavioral_score = 'Not Rated')
+--   THEN 'Not Rated'
+-- ELSE
+--   CAST(ROUND((0.75 * CAST(hd4.goal_score AS NUMERIC) + 0.25 * CAST(hd4.behavioral_score AS NUMERIC)), 2) AS STRING)
+-- END AS final_score,
+-- "Previous Quarter Link Not Available" AS link_mask,
+-- "Previous Quarter Link Not Available" AS link_mask_supervisor
+-- FROM historic_data_q4fy2024 AS hd4
+-- WHERE LEFT(hd4.survey_quarter_plan_fy,2) = "Q4" --reflects historic quarter being brought in, update in the new pasted version below this to reflect the newest historical quarter (which was current quarter previously).
